@@ -1,0 +1,25 @@
+# Caddy config — auto-TLS for HOSTNAME, reverse proxy to the
+# audimo-indexers container on its internal Docker network.
+#
+# sslip.io domains work for ACME http-01 because they DNS-resolve to
+# whatever IP appears in the hostname. Caddy's default cert lifecycle
+# handles renewal.
+
+{$HOSTNAME} {
+    encode gzip
+    reverse_proxy indexers:9005 {
+        # Pass the real client IP through so the indexer's per-IP
+        # rate limits operate on actual users instead of seeing
+        # every request as coming from Caddy.
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+    }
+
+    # Don't log full request URLs — the {config} segment in addon
+    # URLs encodes user secrets (RD api keys, rutracker session
+    # cookies). The indexer already has --no-access-log; mirror that
+    # at the proxy layer.
+    log {
+        output discard
+    }
+}

@@ -1,0 +1,70 @@
+# Hosted audimo-indexers stack for a single Droplet.
+#
+#   indexers : the addon itself. Libtorrent isn't even installed —
+#              this addon is indexer + debrid only. Users' desktop
+#              apps bundle a streaming sidecar that handles peering.
+#   caddy    : TLS termination + reverse proxy via Let's Encrypt.
+#              sslip.io domains work transparently — Caddy treats
+#              <ip>.sslip.io exactly like any other DNS hostname.
+#
+# Usage:
+#   1. Copy .env.example → .env, fill in HOSTNAME + AUDIMO_ADDON_KEY.
+#   2. docker compose up -d
+#
+# State is persisted in the `indexers-state` volume (cache.db). Wipe
+# it to force a clean indexer cache.
+
+services:
+  indexers:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: audimo-indexers
+    restart: unless-stopped
+    expose:
+      - "9005"
+    environment:
+      # Marks the deploy as a hosted instance. Currently informational
+      # only (apibay/bitsearch defaults already turn off when this is
+      # set). The addon never opens peer connections regardless.
+      AUDIMO_HOSTED: "1"
+      # Trust X-Forwarded-For from Caddy so per-IP rate limits don't
+      # see every request as coming from the proxy.
+      AUDIMO_TRUST_FORWARDED: "1"
+      # Shared secret. Caddy still TLS-terminates publicly, but only
+      # requests carrying the matching key in X-Audimo-Addon-Key
+      # land on app code. Keeps random scanners from probing
+      # /resolve/sources.
+      AUDIMO_ADDON_KEY: "${AUDIMO_ADDON_KEY:?set AUDIMO_ADDON_KEY in .env}"
+    volumes:
+      - indexers-state:/state
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9005/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: audimo-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # The hostname users will see in their addon URL. For sslip.io
+      # this is just the Droplet's public IP with dashes:
+      #   <your-public-ip>  →  <your-public-ip-with-dashes>.sslip.io
+      HOSTNAME: "${HOSTNAME:?set HOSTNAME in .env}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - indexers
+
+volumes:
+  indexers-state:
+  caddy-data:
+  caddy-config:
