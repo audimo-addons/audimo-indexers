@@ -44,7 +44,7 @@ HOSTED = (os.environ.get("AUDIMO_HOSTED") or "").strip().lower() in ("1", "true"
 MANIFEST = {
     "id": "audimo-indexers",
     "name": "Audimo Indexers" + (" (hosted)" if HOSTED else ""),
-    "version": "0.16.0",
+    "version": "0.16.1",
     "description": (
         "Aggregates multiple indexers and (eventually) debrid backends. "
         "Designed to be installed as an extension inside the Audimo AIO "
@@ -1648,7 +1648,7 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
     # peer list to each surviving source. Default on; user can
     # disable in settings if their network blocks UDP or they want
     # absolute lowest search latency.
-    if _bool_setting(cfg, "verify_torrents", default=True):
+    if _bool(cfg, "verify_torrents", default=True):
         sources = await cache_db._verify_sources(sources, list(TRACKERS))
 
     return {"sources": sources}
