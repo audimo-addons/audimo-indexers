@@ -1,0 +1,59 @@
+#cloud-config
+# Cloud-init for a fresh Ubuntu 24.04 Droplet running audimo-indexers.
+# Pass this as user-data when creating the Droplet:
+#   doctl compute droplet create audimo-indexers \
+#     --image ubuntu-24-04-x64 --size s-1vcpu-1gb --region nyc3 \
+#     --ssh-keys $(doctl compute ssh-key list -o json | jq -r '.[0].fingerprint') \
+#     --user-data-file ./cloud-init.yaml --wait
+#
+# After Droplet boots, ssh in and set the .env values:
+#   ssh root@<droplet-ip>
+#   cd /opt/audimo-indexers/addons/audimo_indexers/deploy
+#   cp .env.example .env
+#   nano .env   # set HOSTNAME=<ip-with-dashes>.sslip.io and AUDIMO_ADDON_KEY
+#   docker compose up -d --build
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - ufw
+
+runcmd:
+  # Docker official install (faster than waiting for Ubuntu's apt
+  # repo to update its docker.io package, and matches docker compose v2).
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - |
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+      https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+      > /etc/apt/sources.list.d/docker.list
+  - apt-get update -y
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+  # Firewall: only 80/443 (Caddy) and 22 (SSH). The indexer port 9005
+  # is internal to the Docker network — never exposed to the public.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+
+  # Pull repo. Replace with the user's actual git origin.
+  - git clone https://github.com/YOUR_GH_USER/audimo.git /opt/audimo-indexers
+  - chown -R root:root /opt/audimo-indexers
+
+final_message: |
+  Audimo-indexers VM ready. Next steps:
+    1. ssh root@<this-droplet-ip>
+    2. cd /opt/audimo-indexers/addons/audimo_indexers/deploy
+    3. cp .env.example .env  &&  nano .env
+       Set HOSTNAME to <ip-with-dashes>.sslip.io and AUDIMO_ADDON_KEY to a long random string.
+    4. docker compose up -d --build
+    5. Wait ~60s for Caddy to provision the Let's Encrypt cert.
+    6. curl -H "X-Audimo-Addon-Key: <key>" https://<HOSTNAME>/manifest.json
