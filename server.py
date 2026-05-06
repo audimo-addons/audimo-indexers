@@ -1585,16 +1585,18 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
     if confirmed_or_unknown:
         raw = confirmed_or_unknown
 
-    # Sort key (high-to-low): rd_cached → raw seeders.
+    # Sort key (high-to-low): rd_cached → verified single-track → seeders.
     #
-    # Verification and relevance are FILTERS above (rows that fail
-    # them are dropped), not sort tiers. Within the surviving
-    # "torrents that contain the song" set, the only thing the user
-    # asked us to surface is top seeders, with RD-cached on top so
-    # instant-playback torrents lead.
+    # `file_idx is not None` means the indexer ran a file-list check and
+    # confirmed exactly which file in the torrent matches the track. That
+    # beats a high-seeder album torrent where the streaming server has to
+    # guess the right file — and often picks the wrong one on multi-track
+    # releases (e.g. clicking "Love the Way You Lie" picks a different
+    # Eminem track from the album).
     raw.sort(
         key=lambda t: (
             t.get("rd_cached", False),
+            t.get("_file_idx") is not None,
             t.get("seeders", 0),
         ),
         reverse=True,
