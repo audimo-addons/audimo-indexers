@@ -44,7 +44,7 @@ HOSTED = (os.environ.get("AUDIMO_HOSTED") or "").strip().lower() in ("1", "true"
 MANIFEST = {
     "id": "audimo-indexers",
     "name": "Audimo Indexers" + (" (hosted)" if HOSTED else ""),
-    "version": "0.16.1",
+    "version": "0.17.0",
     "description": (
         "Aggregates multiple indexers and (eventually) debrid backends. "
         "Designed to be installed as an extension inside the Audimo AIO "
