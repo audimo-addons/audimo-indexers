@@ -10,7 +10,7 @@ import asyncio
 
 import httpx
 
-from ._shared import _album_collapses_to_artist, make_magnet
+from ._shared import build_search_queries, make_magnet
 
 
 def extract_rd_link(item: dict) -> tuple[str | None, str | None]:
@@ -72,20 +72,14 @@ async def _prowlarr_query(
 async def search_prowlarr(
     base: str, key: str, artist: str, title: str, album: str = ""
 ) -> list[dict]:
-    """Two parallel queries (artist+album, artist+title), dedupe by
-    info_hash. Same shape as the other scrapers."""
-    queries: list[tuple[str, str]] = []
-    if album and not _album_collapses_to_artist(artist, album):
-        queries.append((f"{artist} {album}", "album"))
-    queries.append((f"{artist} {title}", "track"))
-    if artist:
-        queries.append((artist, "artist"))
-
+    """Run the standard 3-query set in parallel, dedupe by info_hash."""
+    queries = build_search_queries(title, artist, album)
+    if not queries:
+        return []
     async with httpx.AsyncClient(timeout=25) as client:
         batch = await asyncio.gather(
-            *(_prowlarr_query(client, base, key, q) for q, _ in queries[:2])
+            *(_prowlarr_query(client, base, key, q) for q, _ in queries)
         )
-
     seen: set[str] = set()
     out: list[dict] = []
     for results, (_q, qtype) in zip(batch, queries):

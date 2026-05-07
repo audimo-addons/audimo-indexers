@@ -18,7 +18,7 @@ import asyncio
 
 import httpx
 
-from ._shared import _album_collapses_to_artist, make_magnet
+from ._shared import build_search_queries, make_magnet
 
 
 APIBAY_BASE = "https://apibay.org"
@@ -95,36 +95,16 @@ async def _apibay_query(client: httpx.AsyncClient, q: str) -> list[dict]:
 
 
 async def search_apibay(artist: str, title: str, album: str = "") -> list[dict]:
-    """Parallel queries against apibay. Dedupe by info_hash.
-
-    Strategy:
-      1. {artist} {album}   — narrow, finds the album torrent (when
-         the album name has tokens beyond the artist).
-      2. {artist} {title}   — narrow, finds singles or torrents named
-         after the track.
-      3. {artist}           — broad, fallback when the album collapses
-         to the artist (self-titled albums) so we still find the album
-         torrent. Without this, `q="blink-182 I Miss You"` returns 1
-         result (the music video), missing the 2003 self-titled album
-         that contains the track. Relevance ranking handles the noise.
-    """
-    queries: list[tuple[str, str]] = []
-    album_collapses = bool(album and artist) and _album_collapses_to_artist(artist, album)
-    if album and artist and not album_collapses:
-        queries.append((f"{artist} {album}", "album"))
-    if artist:
-        queries.append((f"{artist} {title}", "track"))
-    else:
-        queries.append((title, "track"))
-    # Self-titled or empty-album case: also do a broad artist scan.
-    if artist and (album_collapses or not album):
-        queries.append((artist, "artist_fallback"))
-
+    """Run the standard (album / discography / track) query set in
+    parallel and dedupe by info_hash. Ranking lives at the server.py
+    merge level — this just returns everything the queries surface."""
+    queries = build_search_queries(title, artist, album)
+    if not queries:
+        return []
     async with httpx.AsyncClient(timeout=15) as client:
         batch = await asyncio.gather(
-            *(_apibay_query(client, q) for q, _ in queries[:3])
+            *(_apibay_query(client, q) for q, _ in queries)
         )
-
     seen: set[str] = set()
     out: list[dict] = []
     for results, (_q, qtype) in zip(batch, queries):

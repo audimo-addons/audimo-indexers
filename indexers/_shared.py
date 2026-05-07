@@ -228,6 +228,40 @@ def _torrent_name_relevance(name: str, title: str, artist: str, album: str) -> i
     return score
 
 
+def build_search_queries(
+    title: str, artist: str, album: str = ""
+) -> list[tuple[str, str]]:
+    """Return the standard (query, qtype) set every indexer runs.
+
+    Three queries:
+      1. ``{artist} {album}``      — "album"        (skipped without an
+         album, or when the album collapses to the artist)
+      2. ``{artist} discography``  — "discography"  (catches multi-album
+         dumps named "Discography" / similar)
+      3. ``{artist} {title}``      — "track"        (catches single-track
+         uploads or torrents named after the song)
+
+    server.py merges all three queries' results across all indexers,
+    dedupes by info_hash, and sorts by seeders. The point: predictable,
+    inspectable behaviour ("did the album show up?") instead of a
+    relevance-scoring black box that occasionally surfaced unrelated
+    junk via per-indexer fallback chains.
+    """
+    out: list[tuple[str, str]] = []
+    artist = (artist or "").strip()
+    title = (title or "").strip()
+    album = (album or "").strip()
+    if artist and album and not _album_collapses_to_artist(artist, album):
+        out.append((f"{artist} {album}", "album"))
+    if artist:
+        out.append((f"{artist} discography", "discography"))
+    if artist and title:
+        out.append((f"{artist} {title}", "track"))
+    elif title:
+        out.append((title, "track"))
+    return out
+
+
 def _album_collapses_to_artist(artist: str, album: str) -> bool:
     """Return True when the album+artist query reduces to artist alone.
 
