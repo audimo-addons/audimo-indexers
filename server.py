@@ -1524,9 +1524,14 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
 
     # Drop torrents with zero name-relevance signal — no title phrase,
     # no album match, no discography marker. These are noise: they
-    # share the artist token but probably don't contain the song.
-    # Keep them only when nothing else survives, so the picker is
-    # never empty.
+    # share the artist token (or worse, were returned by an artist-
+    # only fallback query like rutracker's chain) but don't actually
+    # contain the song. The previous version kept them when an
+    # indexer's relevant set was empty so the picker wouldn't be empty,
+    # but that just promoted unrelated junk like a Ten Foot Pole skate
+    # punk torrent into a Taking Back Sunday search. Other indexers
+    # almost always have relevant results; if none do, an empty section
+    # is honest.
     #
     # Audiobooks are exempt: their titles often appear as subtitles or
     # author-first variants ("Hail Mary by Andy Weir audiobook" for a
@@ -1535,9 +1540,7 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
     # seeders by design (lazy-resolved), so we'd have nothing to fall
     # back to under the music filter rules.
     if kind != "audiobook":
-        relevant = [t for t in raw if t.get("_relevance", 0) > 0]
-        if relevant:
-            raw = relevant
+        raw = [t for t in raw if t.get("_relevance", 0) > 0]
 
     # ── File-list verification ─────────────────────────────────────
     # For indexers that expose a cheap file-list endpoint, fetch the
@@ -1740,11 +1743,12 @@ async def resolve_sources_stream(payload: dict, request: Request, config: str = 
                     "file_idx": r.get("_file_idx"),
                 })
             # Drop noise (no name signal of containing the track).
-            # Fall back to the unfiltered list if everything would be
-            # dropped, so the picker is never empty.
-            relevant = [s for s in out if s.get("_relevance", 0) > 0]
-            if relevant:
-                out = relevant
+            # No fallback to the unfiltered list — leaking the artist-
+            # fallback query's top-by-seeders (which can be unrelated
+            # junk on rutracker, e.g. a Ten Foot Pole skate-punk torrent
+            # surfacing in a Taking Back Sunday search) is worse than
+            # an empty section. Other indexers carry the picker.
+            out = [s for s in out if s.get("_relevance", 0) > 0]
             # Sort: rd_cached → seeders. Relevance is a filter above
             # (low-relevance rows dropped), not a sort tier.
             out.sort(
