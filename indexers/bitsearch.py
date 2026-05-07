@@ -13,7 +13,7 @@ import asyncio
 
 import httpx
 
-from ._shared import _album_collapses_to_artist, make_magnet
+from ._shared import build_search_queries, make_magnet
 
 
 BITSEARCH_BASE = "https://bitsearch.to"
@@ -53,25 +53,14 @@ async def _bitsearch_query(client: httpx.AsyncClient, q: str) -> list[dict]:
 
 
 async def search_bitsearch(artist: str, title: str, album: str = "") -> list[dict]:
-    """Parallel queries (artist+album, artist+title, artist-fallback),
-    dedupe by info_hash. Same strategy as search_apibay — see there
-    for why the artist-only fallback exists."""
-    queries: list[tuple[str, str]] = []
-    album_collapses = bool(album and artist) and _album_collapses_to_artist(artist, album)
-    if album and artist and not album_collapses:
-        queries.append((f"{artist} {album}", "album"))
-    if artist:
-        queries.append((f"{artist} {title}", "track"))
-    else:
-        queries.append((title, "track"))
-    if artist and (album_collapses or not album):
-        queries.append((artist, "artist_fallback"))
-
+    """Run the standard 3-query set in parallel, dedupe by info_hash."""
+    queries = build_search_queries(title, artist, album)
+    if not queries:
+        return []
     async with httpx.AsyncClient(timeout=15) as client:
         batch = await asyncio.gather(
-            *(_bitsearch_query(client, q) for q, _ in queries[:3])
+            *(_bitsearch_query(client, q) for q, _ in queries)
         )
-
     seen: set[str] = set()
     out: list[dict] = []
     for results, (_q, qtype) in zip(batch, queries):

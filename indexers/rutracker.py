@@ -13,7 +13,7 @@ import re
 
 import httpx
 
-from ._shared import _album_collapses_to_artist
+from ._shared import build_search_queries
 from cache_db import _cache_get_indexer_query, _cache_put_indexer_query
 
 
@@ -156,35 +156,23 @@ async def _rutracker_query(client: httpx.AsyncClient, q: str) -> list[dict]:
 async def search_rutracker(
     bb_session: str, artist: str, title: str, album: str = ""
 ) -> list[dict]:
-    """Sequential queries (rutracker rate-limits parallel ~20s/each).
-    Tries the strongest query first and falls back if it 0-results:
+    """Run the standard (album / discography / track) query set against
+    rutracker. Sequential, not parallel — rutracker rate-limits and a
+    burst gets us throttled or banned. ~20s per query, so the full
+    set finishes in ~60s.
 
-      1. {artist} {album}     — full-album uploads are richest
-      2. {artist} {title}     — single/track-named uploads
-      3. {artist}              — broad fallback (catches discographies,
-                                 self-titled albums, niche releases)
-
-    Without the chain, an album the user requested that rutracker
-    doesn't index by that exact name (e.g. '8 Mile (Music From And
-    Inspired By The Motion Picture)' for 'Lose Yourself') returns
-    nothing — even though rutracker has Eminem discographies that
-    contain the track."""
+    Unlike the other indexers, rutracker used to break on first-
+    success because the chain was a fallback ladder. The standard
+    set treats each query as additive (the discography query catches
+    different uploads than the album one), so we run all three and
+    dedupe."""
     cookies = _rt_cookie_jar(bb_session)
     if not cookies:
         print("[rutracker] search aborted: bb_session cookie not provided")
         return []
-
-    album_collapses = bool(album and artist) and _album_collapses_to_artist(artist, album)
-    queries: list[tuple[str, str]] = []
-    if album and artist and not album_collapses:
-        queries.append((f"{artist} {album}", "album"))
-    if artist and title:
-        queries.append((f"{artist} {title}", "track"))
-    elif title:
-        queries.append((title, "track"))
-    if artist:
-        queries.append((artist, "artist_fallback"))
-
+    queries = build_search_queries(title, artist, album)
+    if not queries:
+        return []
     seen: set[str] = set()
     out: list[dict] = []
     async with httpx.AsyncClient(
@@ -200,9 +188,4 @@ async def search_rutracker(
                 seen.add(k)
                 r["query_type"] = qtype
                 out.append(r)
-            # Stop as soon as we have something — rutracker queries
-            # are slow and the fallback chain only exists to recover
-            # from 0-results, not to broaden a working query.
-            if out:
-                break
     return out

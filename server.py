@@ -566,7 +566,6 @@ from indexers._shared import (
     is_video,
     make_magnet,
     _seed_bucket,
-    _torrent_name_relevance,
     _album_collapses_to_artist,
     _files_contain_track,
     _normalize_title_phrase,
@@ -1508,39 +1507,18 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
     for t in raw:
         nm = t.get("name", "")
         q = _parse_torrent_quality(nm)
-        version_tags, version_penalty = _detect_version_tags(nm, title)
-        t["_quality_score"] = _quality_score(q)
-        t["_version_penalty"] = version_penalty
-        # Name-relevance: does this torrent's name look like it
-        # contains the requested track? (Phrase match on title,
-        # album, discography markers.) Computed once here, reused
-        # by both the cap-at-N below and the SSE streaming path.
-        t["_relevance"] = _torrent_name_relevance(nm, title, artist, album)
-        # Combined display tags: quality (FLAC/320k) + version variants
-        # (Live/Instrumental/…). Picker can render these as small badges.
+        # Display-only badges: quality (FLAC/320k) + version variants
+        # (Live/Instrumental/…). Quality no longer factors into ranking
+        # — search is sorted purely by seeders + rd_cached.
+        version_tags, _ = _detect_version_tags(nm, title)
         t["version_tags"] = list(q["tags"]) + [v.replace("_", " ").title() for v in version_tags]
         if q["year"]:
             t.setdefault("year", q["year"])
 
-    # Drop torrents with zero name-relevance signal — no title phrase,
-    # no album match, no discography marker. These are noise: they
-    # share the artist token (or worse, were returned by an artist-
-    # only fallback query like rutracker's chain) but don't actually
-    # contain the song. The previous version kept them when an
-    # indexer's relevant set was empty so the picker wouldn't be empty,
-    # but that just promoted unrelated junk like a Ten Foot Pole skate
-    # punk torrent into a Taking Back Sunday search. Other indexers
-    # almost always have relevant results; if none do, an empty section
-    # is honest.
-    #
-    # Audiobooks are exempt: their titles often appear as subtitles or
-    # author-first variants ("Hail Mary by Andy Weir audiobook" for a
-    # search of "Project Hail Mary"), and the music-tuned phrase match
-    # drops too many legitimate hits. Audiobookbay also returns 0
-    # seeders by design (lazy-resolved), so we'd have nothing to fall
-    # back to under the music filter rules.
-    if kind != "audiobook":
-        raw = [t for t in raw if t.get("_relevance", 0) > 0]
+    # Drop video torrents — music videos / TV rips share the artist+
+    # title phrase but are useless as audio sources. Cheap filename
+    # check, no relevance scoring needed.
+    raw = [t for t in raw if not is_video(t.get("name", ""))]
 
     # ── File-list verification ─────────────────────────────────────
     # For indexers that expose a cheap file-list endpoint, fetch the
@@ -1559,7 +1537,6 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
         raw,
         key=lambda t: (
             t.get("rd_cached", False),
-            1 if t.get("_relevance", 0) >= 80 else 0,
             t.get("seeders", 0),
         ),
         reverse=True,
@@ -1588,18 +1565,12 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
     if confirmed_or_unknown:
         raw = confirmed_or_unknown
 
-    # Sort key (high-to-low): rd_cached → verified single-track → seeders.
-    #
-    # `file_idx is not None` means the indexer ran a file-list check and
-    # confirmed exactly which file in the torrent matches the track. That
-    # beats a high-seeder album torrent where the streaming server has to
-    # guess the right file — and often picks the wrong one on multi-track
-    # releases (e.g. clicking "Love the Way You Lie" picks a different
-    # Eminem track from the album).
+    # Pure top-seeded ranking, with rd_cached as the only tier above.
+    # The 3-query strategy (album / discography / track) keeps results
+    # focused without needing relevance or verified-file tiers.
     raw.sort(
         key=lambda t: (
             t.get("rd_cached", False),
-            t.get("_file_idx") is not None,
             t.get("seeders", 0),
         ),
         reverse=True,
@@ -1628,10 +1599,6 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
             "version_tags": t.get("version_tags", []),
             "year": t.get("year"),
             "addon_id": MANIFEST["id"],
-            # Preserve the relevance score so audimo-aio's cross-
-            # extension merge can rank with it; otherwise the merge's
-            # own sort drops the ordering we just computed.
-            "_relevance": t.get("_relevance", 0),
             # File-list verification: True (✅ confirmed file inside),
             # False (filtered out earlier), None (unverified — indexer
             # didn't expose a cheap file list). Picker renders ✅ only
@@ -1655,6 +1622,17 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
     # absolute lowest search latency.
     if _bool(cfg, "verify_torrents", default=True):
         sources = await cache_db._verify_sources(sources, list(TRACKERS))
+        # Live tracker verification rewrites `seeders` with the count
+        # the tracker actually reported, which can differ from what the
+        # indexer scraped. Re-sort so the picker shows highest-live-
+        # seeders first instead of the indexer-time order.
+        sources.sort(
+            key=lambda s: (
+                s.get("rd_cached", False),
+                s.get("seeders", 0),
+            ),
+            reverse=True,
+        )
 
     return {"sources": sources}
 
@@ -1706,9 +1684,7 @@ async def resolve_sources_stream(payload: dict, request: Request, config: str = 
                 else:
                     rd_cached = False
                 q = _parse_torrent_quality(nm)
-                version_tags, version_penalty = _detect_version_tags(nm, title)
-                qscore = _quality_score(q)
-                relevance = _torrent_name_relevance(nm, title, artist, album)
+                version_tags, _ = _detect_version_tags(nm, title)
                 sid = r.get("info_hash") or nm
                 out.append({
                     "id": sid,
@@ -1726,8 +1702,6 @@ async def resolve_sources_stream(payload: dict, request: Request, config: str = 
                     "version_tags": list(q["tags"]) + [v.replace("_"," ").title() for v in version_tags],
                     "year": q["year"],
                     "addon_id": MANIFEST["id"],
-                    "_qscore": qscore + version_penalty,
-                    "_relevance": relevance,
                     # Pull verification from the raw row — set by the
                     # post-search verification pass below for indexers
                     # that expose a file-list endpoint (apibay today).
@@ -1742,15 +1716,10 @@ async def resolve_sources_stream(payload: dict, request: Request, config: str = 
                     # to the server's "largest playable file" pick).
                     "file_idx": r.get("_file_idx"),
                 })
-            # Drop noise (no name signal of containing the track).
-            # No fallback to the unfiltered list — leaking the artist-
-            # fallback query's top-by-seeders (which can be unrelated
-            # junk on rutracker, e.g. a Ten Foot Pole skate-punk torrent
-            # surfacing in a Taking Back Sunday search) is worse than
-            # an empty section. Other indexers carry the picker.
-            out = [s for s in out if s.get("_relevance", 0) > 0]
-            # Sort: rd_cached → seeders. Relevance is a filter above
-            # (low-relevance rows dropped), not a sort tier.
+            # Sort: rd_cached → seeders. Pure top-seeded ranking,
+            # no relevance / quality / verified tiers — the 3-query
+            # search strategy (album / discography / track) keeps
+            # results focused without scoring.
             out.sort(
                 key=lambda s: (
                     s.get("rd_cached", False),
@@ -1758,13 +1727,6 @@ async def resolve_sources_stream(payload: dict, request: Request, config: str = 
                 ),
                 reverse=True,
             )
-            # Strip the internal `_qscore` but keep `_relevance` so
-            # the aggregator (audimo-aio) can factor it into its own
-            # cross-extension merge ranking. Without this, audimo-aio
-            # re-sorts by (rd_cached, quality, seeders, size) only
-            # and undoes the relevance ordering we just computed.
-            for s in out:
-                s.pop("_qscore", None)
             return out[:limit]
 
         async def run(spec: dict):
