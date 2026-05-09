@@ -250,14 +250,25 @@ MANIFEST = {
 }
 
 
-app = FastAPI(title=MANIFEST["name"], version=MANIFEST["version"])
+app = FastAPI(
+    title=MANIFEST["name"],
+    version=MANIFEST["version"],
+    # Auto-generated docs UI fingerprints every route on a public host
+    # — set AUDIMO_DEBUG=1 to opt back in.
+    docs_url="/docs" if str(os.environ.get("AUDIMO_DEBUG", "")).lower() in {"1", "true", "yes"} else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if str(os.environ.get("AUDIMO_DEBUG", "")).lower() in {"1", "true", "yes"} else None,
+)
 
 # Audimo addons are called from the user's browser (device-as-client)
 # and from other addons (the aggregator), so they must allow any
-# cross-origin caller.
+# cross-origin caller. `allow_credentials=False` is a hard pin — auth
+# (when configured) is a header bearer token, never a cookie, so we
+# never want to turn the wildcard origin into a credentialed one.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -700,9 +711,9 @@ def _admin_snapshot(cfg: dict | None = None) -> dict:
     snap["active_debrid"] = active.name if active else None
 
     # SQLite cache stats.
-    cache_stats = {"db_path": _CACHE_DB_PATH}
+    cache_stats = {"db_path": cache_db._CACHE_DB_PATH}
     try:
-        with sqlite3.connect(_CACHE_DB_PATH) as conn:
+        with sqlite3.connect(cache_db._CACHE_DB_PATH) as conn:
             now = _admin_time.time()
             cache_stats["debrid_library_rows"] = conn.execute(
                 "SELECT COUNT(*) FROM debrid_library WHERE expires_at > ?", (now,)
@@ -717,7 +728,7 @@ def _admin_snapshot(cfg: dict | None = None) -> dict:
                 "SELECT COUNT(*) FROM indexer_query WHERE expires_at <= ?", (now,)
             ).fetchone()[0]
         try:
-            cache_stats["db_size_bytes"] = os.path.getsize(_CACHE_DB_PATH)
+            cache_stats["db_size_bytes"] = os.path.getsize(cache_db._CACHE_DB_PATH)
         except Exception:
             cache_stats["db_size_bytes"] = None
     except Exception as e:
