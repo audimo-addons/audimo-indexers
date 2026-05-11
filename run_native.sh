@@ -18,10 +18,13 @@ if [[ ! -d .venv ]]; then
   .venv/bin/pip install --quiet -r requirements.txt
 fi
 
-echo "[run] starting audimo-indexers on http://0.0.0.0:9005"
+# Default to 127.0.0.1 — `0.0.0.0` exposes the addon (and any baked
+# debrid credentials) to the LAN and requires an explicit opt-in.
+ADDON_HOST="${AUDIMO_ADDON_HOST:-${TUNNEL_ADDON_HOST:-127.0.0.1}}"
+echo "[run] starting audimo-indexers on http://${ADDON_HOST}:9005"
 
 exec .venv/bin/uvicorn server:app \
-  --host 0.0.0.0 \
+  --host "${ADDON_HOST}" \
   --port 9005 \
   --proxy-headers \
   --no-access-log \

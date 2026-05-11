@@ -17,7 +17,15 @@ from server import app
 
 
 def main() -> None:
-    host = os.getenv("AUDIMO_INDEXERS_HOST", "0.0.0.0")
+    # Default to 127.0.0.1; `0.0.0.0` requires an explicit opt-in
+    # because it exposes the addon (and any baked-in debrid creds) to
+    # the LAN.
+    host = (
+        os.getenv("AUDIMO_INDEXERS_HOST")
+        or os.getenv("AUDIMO_ADDON_HOST")
+        or os.getenv("TUNNEL_ADDON_HOST")
+        or "127.0.0.1"
+    )
     port = int(os.getenv("AUDIMO_INDEXERS_PORT", "9005"))
     # access_log=False: addon URLs carry user secrets (RD api key,
     # rutracker bb_session, prowlarr key) in path segments. uvicorn's
