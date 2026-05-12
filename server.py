@@ -365,15 +365,53 @@ app.add_middleware(
 _ADDON_KEY = (os.environ.get("AUDIMO_ADDON_KEY") or "").strip()
 
 
+def _peer_is_loopback(request: Request) -> bool:
+    """True if the request came from 127.0.0.1 / ::1. Used as the
+    fallback auth for credential-test endpoints in keyless mode —
+    only same-machine processes (the user's /configure page in a
+    local browser) can reach loopback."""
+    host = (request.client.host if request.client else "") or ""
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def _is_test_path(path: str) -> bool:
+    """/test/<backend> endpoints accept a payload-supplied API key
+    and probe the upstream service. In keyless mode they're a
+    credential-stuffing oracle: an attacker on the LAN can feed a
+    list of leaked Real-Debrid / EasyDebrid keys through this addon
+    and the addon's IP is what shows up in the upstream service's
+    rate-limit logs. Gate behind loopback OR a valid addon key."""
+    return "/test/" in path
+
+
 @app.middleware("http")
 async def _require_addon_key(request: Request, call_next):
+    p = request.url.path
+    method = request.method
+
+    # Keyless mode: allow most paths through, but credential-test
+    # endpoints still require a loopback peer. Without this the
+    # /test/rd endpoint becomes a public oracle for the user's RD
+    # account on hosted deploys that forgot AUDIMO_ADDON_KEY.
     if not _ADDON_KEY:
+        if (
+            method != "OPTIONS"
+            and _is_test_path(p)
+            and not _peer_is_loopback(request)
+        ):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                {"detail": "credential-test endpoints require local-only access or AUDIMO_ADDON_KEY"},
+                status_code=403,
+            )
         return await call_next(request)
-    if request.method == "OPTIONS":
+
+    # Keyed mode (hosted deploy): original allowlist.
+    if method == "OPTIONS":
         return await call_next(request)
     # Manifest is always public — clients call it before they know
     # the key (during install URL probing).
-    if request.url.path.endswith("/manifest.json"):
+    if p.endswith("/manifest.json"):
         return await call_next(request)
     # /configure is the page where the user types the key in the
     # first place, so it can't itself require the key — that's a
@@ -381,7 +419,6 @@ async def _require_addon_key(request: Request, call_next):
     # (HTML + JS that builds an install URL); no live data leaks
     # by serving it. Same for /health — the container healthcheck
     # in compose hits http://localhost:9005/health without auth.
-    p = request.url.path
     if p.endswith("/configure") or p == "/health":
         return await call_next(request)
     presented = request.headers.get("x-audimo-addon-key", "").strip()
@@ -1549,17 +1586,44 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
     # debrid the user has configured.
     rd_task = asyncio.create_task(debrid.fetch_downloaded()) if debrid else None
 
+    # Per-indexer semaphore: stops a single user's source query from
+    # opening N concurrent connections per indexer at fan-out time.
+    # Some indexers (Prowlarr, RuTracker) rate-limit aggressively and
+    # ban IPs that breach the threshold — without per-indexer pacing
+    # an addon-side fan-out of "search apibay+bitsearch+rutracker+
+    # prowlarr+torrentdownload+audiobookbay" can fire 6+ requests
+    # back-to-back. Capacity 2 leaves room for one in-flight request
+    # plus one queued, which is plenty for the user's typing cadence
+    # while bounding the burst.
+    _PER_INDEXER_SEM: dict[str, asyncio.Semaphore] = ctx.setdefault(
+        "_per_indexer_sem", {}
+    )
+    async def _gated_search(spec):
+        sem = _PER_INDEXER_SEM.setdefault(spec["id"], asyncio.Semaphore(2))
+        async with sem:
+            return await spec["search"](cfg, ctx)
+
     batch = await asyncio.gather(
-        *(spec["search"](cfg, ctx) for spec in runnable),
+        *(_gated_search(spec) for spec in runnable),
         return_exceptions=True,
     )
 
     raw: list[dict] = []
     seen: set[str] = set()
+    indexer_errors: list[dict] = []
     for spec, results in zip(runnable, batch):
         if isinstance(results, BaseException):
             print(f"[sources] {spec['id']} raised: "
                   f"{type(results).__name__}: {str(results)[:200]}")
+            # Surface the failure to the caller. The SSE wrapper below
+            # adds these to the emitted stream so the frontend's
+            # source picker can show "Indexer X errored" instead of
+            # silently dropping that indexer's would-be results.
+            indexer_errors.append({
+                "indexer": spec["id"],
+                "type": type(results).__name__,
+                "message": str(results)[:200],
+            })
             continue
         for r in results or []:
             if is_video(r.get("name", "")):
@@ -1723,7 +1787,14 @@ async def resolve_sources(payload: dict, request: Request, config: str = "") -> 
             reverse=True,
         )
 
-    return {"sources": sources}
+    # ``indexer_errors`` is set by the per-indexer fan-out above.
+    # Frontends that want to surface "indexer X is down" can read it;
+    # older clients that only look at ``sources`` ignore it. Empty
+    # list when every indexer succeeded — same shape either way.
+    return {
+        "sources": sources,
+        "indexer_errors": indexer_errors if "indexer_errors" in locals() else [],
+    }
 
 
 @app.post("/resolve/sources/stream")
